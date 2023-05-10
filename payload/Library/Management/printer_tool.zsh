@@ -24,8 +24,10 @@ DIR=$(dirname "${0:a}")
 SCRIPT=$(basename "$0")
 
 function log() {
-    timestamp=$(date +%Y-%m-%d\ %H:%M:%S%z)
-    echo "$timestamp [$DIR/$SCRIPT] $1"
+    local timestamp=$(date +%Y-%m-%d\ %H:%M:%S%z)
+    local message="$timestamp [$DIR/$SCRIPT] $1"
+    echo "${message}"
+    echo "${message}" >> /tmp/"${SCRIPT}"
 }
 
 
@@ -92,17 +94,21 @@ location=$1
 
 # assert user is a member of _lpadmin group
 # ToDo: implement check to assert user is a member of _lpadmin group
+# Grab the currently logged in user to set the language for all dialogue messages
+current_user=$(/usr/sbin/scutil <<< "show State:/Users/ConsoleUser" | /usr/bin/awk -F': ' '/[[:space:]]+Name[[:space:]]:/ { if ( $2 != "loginwindow" ) { print $2 }}')
+current_uid=$(/usr/bin/id -u "$current_user")
+
 
 # assert contact with internal corporate network
 # shellcheck disable=SC2046
 if ! ping -c 1 "${LDAP_HOST}" &> /dev/null ; then
-    message="No contact with host [${LDAP_HOST}] in corporate network detected. Cannot get printer settings, please ensure you're connected before trying again."
+    message="No contact with host [${LDAP_HOST}] in corporate network detected.\n\nCannot get printer settings, please ensure you're connected before trying again."
     log "${message}"
     # /usr/local/bin/hubcli notify -t "${message}" # can only use hubcli if running as root
     # open_osascript_dialog syntax: title, message, button1, icon
     dialog_window_title="$SCRIPT"
-    dialog_check_desc="$message"
-    open_osascript_dialog "${!dialog_window_title}" "${!dialog_check_desc}" "OK" stop &
+    dialog_desc="$message"
+    open_osascript_dialog "${dialog_window_title}" "${dialog_desc}" "OK" stop
     exit 1
 fi
 
@@ -111,18 +117,21 @@ fi
 # one fine day we'll fetch the closest printers for the office location from either Azure AD or on-prem AD using ldapsearch or something else clever.
 #
 # legacy search in on-prem AD for printer to get IP
-# ldapsearch -Hldap://internal.example.com -b 'dc=internal,dc=example,dc=com' -Q -LLL '(&(objectClass=printQueue)(printShareName=" & InputString & "))' printerName location portName serverName printShareName|grep portName|sed 's/portName: IP_//g'
+# ldapsearch -H ldap://internal.example.com -b 'dc=internal,dc=example,dc=com' -Q -LLL '(&(objectClass=printQueue)(printShareName=" & InputString & "))' printerName location portName serverName printShareName|grep portName|sed 's/portName: IP_//g'
 #
-# 2023-04-30 working search for pullprint servers - no encryption or auth needed
+# 2023-04-30 working search for pullprint servers
 # ldapsearch -v -H ldap://internal.example.com -b 'dc=internal,dc=example,dc=com' -Q -LLL '(&(objectClass=printQueue)(printShareName=pullprint*))' printerName description name keywords serverName printShareName
 #
+log "Looking up settings for printer [${PRINTER} ${location}] in AD using LDAP"
 ldap_filter="(&(objectClass=printQueue)(printerName=${PRINTER} ${location}))"
 #
+# may need to make sure to run as console user so we can use their Kerberos SSO cache
+# /bin/launchctl asuser "$current_uid"
 # search LDAP, output to tmp file
-ldapsearch -H "ldap://${LDAP_HOST}" -b "${LDAP_BASE}" -Q -LLL "${ldap_filter}"  printerName description name keywords serverName printShareName > /tmp/printertool.txt
+ldapsearch -H "ldap://${LDAP_HOST}" -b "${LDAP_BASE}" -Q -LLL "${ldap_filter}"  printerName description name keywords serverName printShareName > /tmp/printer_tool.txt
 
 # we need exactly one match in the search results
-num_results=$( grep -c '^dn:' /tmp/printertool.txt )
+num_results=$( grep -c '^dn:' /tmp/printer_tool.txt )
 if [ "${num_results}" != "1" ] ; then
     message="Found [${num_results}] LDAP match(es) for [${PRINTER} ${location}] but need exactly one - aborting"
     log "${message}"
@@ -131,11 +140,11 @@ if [ "${num_results}" != "1" ] ; then
 fi
 
 # get the printer/printserver address
-printer_address=$( awk -F ": " '$1 == "serverName" {print $2}' /tmp/printertool.txt )
+printer_address=$( awk -F ": " '$1 == "serverName" {print $2}' /tmp/printer_tool.txt )
 log "Printer/printserver address: $printer_address"
 
 # get the print share name, replace any spaces with %20
-printer_queue=$( awk -F ": " '$1 == "printShareName" {print $2}' /tmp/printertool.txt | sed "s/ /%20/g" )
+printer_queue=$( awk -F ": " '$1 == "printShareName" {print $2}' /tmp/printer_tool.txt | sed "s/ /%20/g" )
 log "Printer/printserver queue: $printer_queue"
 
 ## initialize vars that will show up in the GUI
@@ -155,7 +164,7 @@ if ( lpstat -v | grep -q "${cups_queue}" ) ; then
     lpadmin -x "${cups_queue}"
     #sleep 3
 else
-    log "Printer queue ${cups_queue} does not exist. Skipping..."
+    log "Printer queue ${cups_queue} does not exist yet."
 fi
 
 
