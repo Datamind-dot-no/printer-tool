@@ -67,6 +67,8 @@ COMPANY=$( defaults read ${PREF_DOMAIN} COMPANY )
 PRINTER=$( defaults read ${PREF_DOMAIN} PRINTER )
 LDAP_HOST=$( defaults read ${PREF_DOMAIN} LDAP_HOST )
 LDAP_BASE=$( defaults read ${PREF_DOMAIN} LDAP_BASE )
+AD_DOMAIN=$( defaults read ${PREF_DOMAIN} AD_DOMAIN )
+AD_USERNAME=$( defaults read ${PREF_DOMAIN} AD_USERNAME )
 PPD_DIR=$( defaults read ${PREF_DOMAIN} PPD_DIR )
 PPD_NAME=$( defaults read ${PREF_DOMAIN} PPD_NAME )
 DRIVER_DEFAULTS=$( defaults read ${PREF_DOMAIN} DRIVER_DEFAULTS )
@@ -92,8 +94,10 @@ fi
 location=$1
 
 
-# assert user is a member of _lpadmin group
+# assert user is a member of _lpadmin group - may no longer be needed in latest macOS version (Sequoia)
 # ToDo: implement check to assert user is a member of _lpadmin group
+
+
 # Grab the currently logged in user to set the language for all dialogue messages
 current_user=$(/usr/sbin/scutil <<< "show State:/Users/ConsoleUser" | /usr/bin/awk -F': ' '/[[:space:]]+Name[[:space:]]:/ { if ( $2 != "loginwindow" ) { print $2 }}')
 current_uid=$(/usr/bin/id -u "$current_user")
@@ -111,6 +115,48 @@ if ! ping -c 1 "${LDAP_HOST}" &> /dev/null ; then
     open_osascript_dialog "${dialog_window_title}" "${dialog_desc}" "OK" stop
     exit 1
 fi
+
+
+# assert we have Kerberos credentials
+if ! klist  &> /dev/null ; then
+    message="No network credentials (Kerberos SSO) detected.\n\nCannot get printer settings, please ensure you're logged in to Apple Enterprise SSO before trying again."
+    log "${message}"
+    dialog_window_title="$SCRIPT"
+    dialog_desc="$message"
+    open_osascript_dialog "${dialog_window_title}" "${dialog_desc}" "OK" stop
+    exit 1
+fi
+
+
+## Check AD binding -Thanks to https://community.jamf.com/t5/jamf-pro/command-line-to-check-for-ad-bind/m-p/220085
+# Check the domain returned with dsconfigad
+domain=$( dsconfigad -show | awk '/Active Directory Domain/{print $NF}' )
+# If the domain is correct
+if [[ "$domain" == "${AD_DOMAIN}" ]]; then
+    # Check the id of a user
+    id -u "${AD_USERNAME}" > /dev/null 2>&1
+    # If the check was successful...
+    if [[ $? == 0 ]]; then
+        log "The Mac is bound to our AD, and lookup is working."
+    else
+        # If the check failed
+        message="The Mac AD bind is NOT working properly.\n\nPlease ask for assistance to repair AD binding so you can print."
+        log "${message}"
+        dialog_window_title="$SCRIPT"
+        dialog_desc="$message"
+        open_osascript_dialog "${dialog_window_title}" "${dialog_desc}" "OK" stop
+        exit 1
+    fi
+else
+    # If the domain returned did not match our expectations
+    message="The Mac is NOT bound to our domain.\n\nPlease execute the workflow for AD binding or ask for assistance to do so."
+    log "${message}"
+    dialog_window_title="$SCRIPT"
+    dialog_desc="$message"
+    open_osascript_dialog "${dialog_window_title}" "${dialog_desc}" "OK" stop
+    exit 1
+fi
+
 
 
 ## use AD to retrieve list of print servers
