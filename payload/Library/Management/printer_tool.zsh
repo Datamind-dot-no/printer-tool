@@ -235,4 +235,9 @@ if [[ "$PRINTER_PROTOCOL" == "smb://" ]]; then
     lpadmin -p "${cups_queue}" -o auth-info-required=negotiate
 fi
 
+
+open /System/Library/PreferencePanes/PrintAndFax.prefPane
+
+
+
 exit 0
